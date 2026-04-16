@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎙️ Whisper Transcriptor</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg: #0f0f13;
+            --surface: #1a1a24;
+            --surface2: #22223a;
+            --accent: #7c5cfc;
+            --accent2: #a78bfa;
+            --accent-glow: rgba(124, 92, 252, 0.3);
+            --text: #e8e8f0;
+            --text-muted: #8888a8;
+            --border: rgba(255, 255, 255, 0.08);
+            --success: #34d399;
+            --error: #f87171;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1rem;
+            background-image:
+                radial-gradient(ellipse at 20% 20%, rgba(124, 92, 252, 0.15) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(167, 139, 250, 0.1) 0%, transparent 50%);
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 2.5rem;
+        }
+
+        header .icon {
+            font-size: 3.5rem;
+            margin-bottom: 0.5rem;
+            display: block;
+            filter: drop-shadow(0 0 20px var(--accent-glow));
+        }
+
+        header h1 {
+            font-size: 2.2rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent2), var(--accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        header p {
+            color: var(--text-muted);
+            margin-top: 0.5rem;
+            font-size: 1rem;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 2rem;
+            width: 100%;
+            max-width: 680px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+        }
+
+        /* Drop Zone */
+        .drop-zone {
+            border: 2px dashed rgba(124, 92, 252, 0.4);
+            border-radius: 14px;
+            padding: 3rem 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            background: rgba(124, 92, 252, 0.04);
+        }
+
+        .drop-zone:hover,
+        .drop-zone.drag-over {
+            border-color: var(--accent);
+            background: rgba(124, 92, 252, 0.1);
+            box-shadow: 0 0 30px var(--accent-glow);
+        }
+
+        .drop-zone input[type="file"] {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            top: 0;
+            left: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        .drop-zone .upload-icon {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            display: block;
+        }
+
+        .drop-zone h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 0.4rem;
+        }
+
+        .drop-zone p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .file-selected {
+            display: none;
+            align-items: center;
+            gap: 1rem;
+            padding: 1rem 1.2rem;
+            background: rgba(124, 92, 252, 0.1);
+            border-radius: 10px;
+            margin-top: 1rem;
+            border: 1px solid rgba(124, 92, 252, 0.3);
+        }
+
+        .file-selected .file-icon {
+            font-size: 1.8rem;
+        }
+
+        .file-selected .file-info {
+            flex: 1;
+            text-align: left;
+        }
+
+        .file-selected .file-name {
+            font-weight: 600;
+            font-size: 0.95rem;
+            word-break: break-all;
+        }
+
+        .file-selected .file-size {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 0.2rem;
+        }
+
+        /* Options */
+        .options {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            margin-top: 1.5rem;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+
+        .form-group select {
+            width: 100%;
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 0.75rem 1rem;
+            color: var(--text);
+            font-family: 'Inter', sans-serif;
+            font-size: 0.9rem;
+            outline: none;
+            transition: border-color 0.2s;
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='%238888a8' viewBox='0 0 24 24'%3E%3Cpath d='M7 10l5 5 5-5z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 0.75rem center;
+            background-size: 1.2rem;
+        }
+
+        .form-group select:focus {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-glow);
+        }
+
+        /* Button */
+        .btn-transcribir {
+            width: 100%;
+            margin-top: 1.5rem;
+            padding: 1rem 2rem;
+            background: linear-gradient(135deg, var(--accent), #5b3fd4);
+            border: none;
+            border-radius: 12px;
+            color: white;
+            font-family: 'Inter', sans-serif;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.6rem;
+        }
+
+        .btn-transcribir:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px var(--accent-glow);
+        }
+
+        .btn-transcribir:active:not(:disabled) {
+            transform: translateY(0);
+        }
+
+        .btn-transcribir:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Loading / Progress */
+        .loading {
+            display: none;
+            margin-top: 1.5rem;
+            background: var(--surface2);
+            border-radius: 14px;
+            padding: 1.5rem;
+            border: 1px solid var(--border);
+        }
+
+        .loading-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+        }
+
+        .loading-header h4 {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--accent2);
+        }
+
+        .loading-pct {
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: var(--accent2);
+        }
+
+        /* Barra de progreso */
+        .progress-bar-track {
+            width: 100%;
+            height: 10px;
+            background: rgba(255, 255, 255, 0.06);
+            border-radius: 99px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            border-radius: 99px;
+            background: linear-gradient(90deg, var(--accent), var(--accent2));
+            width: 0%;
+            transition: width 0.6s ease;
+            position: relative;
+            box-shadow: 0 0 12px var(--accent-glow);
+        }
+
+        .progress-bar-fill::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.3) 50%, transparent 100%);
+            animation: shimmer 1.5s infinite;
+        }
+
+        @keyframes shimmer {
+            0% {
+                transform: translateX(-100%);
+            }
+
+            100% {
+                transform: translateX(100%);
+            }
+        }
+
+        .loading-status {
+            margin-top: 0.8rem;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .dot-pulse {
+            display: flex;
+            gap: 4px;
+            align-items: center;
+        }
+
+        .dot-pulse span {
+            width: 5px;
+            height: 5px;
+            border-radius: 50%;
+            background: var(--accent);
+            display: inline-block;
+            animation: bounce 1.2s infinite;
+        }
+
+        .dot-pulse span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .dot-pulse span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes bounce {
+
+            0%,
+            80%,
+            100% {
+                transform: scale(0.7);
+                opacity: 0.4;
+            }
+
+            40% {
+                transform: scale(1.1);
+                opacity: 1;
+            }
+        }
+
+        /* Result */
+        .result {
+            display: none;
+            margin-top: 1.5rem;
+        }
+
+        .result-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+        }
+
+        .result-header h3 {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--success);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .result-meta {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            background: var(--surface2);
+            padding: 0.3rem 0.8rem;
+            border-radius: 20px;
+        }
+
+        .result-text {
+            background: var(--surface2);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            font-size: 0.95rem;
+            line-height: 1.8;
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 350px;
+            overflow-y: auto;
+            color: var(--text);
+        }
+
+        .result-text::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        .result-text::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .result-text::-webkit-scrollbar-thumb {
+            background: var(--accent);
+            border-radius: 10px;
+        }
+
+        .btn-copy {
+            margin-top: 1rem;
+            padding: 0.6rem 1.2rem;
+            background: transparent;
+            border: 1px solid var(--accent);
+            border-radius: 8px;
+            color: var(--accent2);
+            font-family: 'Inter', sans-serif;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .btn-copy:hover {
+            background: rgba(124, 92, 252, 0.1);
+        }
+
+        /* Error */
+        .error-msg {
+            display: none;
+            margin-top: 1.5rem;
+            padding: 1rem 1.2rem;
+            background: rgba(248, 113, 113, 0.1);
+            border: 1px solid rgba(248, 113, 113, 0.3);
+            border-radius: 10px;
+            color: var(--error);
+            font-size: 0.9rem;
+            align-items: center;
+            gap: 0.6rem;
+        }
+
+        .divider {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 1.5rem 0;
+        }
+
+        .badges {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            margin-top: 1rem;
+        }
+
+        .badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            background: var(--surface2);
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <span class="icon">🎙️</span>
+        <h1>Whisper Transcriptor</h1>
+        <p>Transcribe cualquier audio a texto con inteligencia artificial</p>
+    </header>
+
+    <div class="card">
+        <form id="formTranscribir">
+
+            <!-- Drop Zone -->
+            <div class="drop-zone" id="dropZone">
+                <input type="file" name="audio" id="audioInput"
+                    accept=".mp3,.wav,.m4a,.ogg,.flac,.mp4,.avi,.mkv,.webm,.wma">
+                <span class="upload-icon">📁</span>
+                <h3>Arrastra tu audio aquí</h3>
+                <p>o haz clic para seleccionar un archivo</p>
+                <div class="badges">
+                    <span class="badge">MP3</span><span class="badge">WAV</span>
+                    <span class="badge">M4A</span><span class="badge">OGG</span>
+                    <span class="badge">FLAC</span><span class="badge">MP4</span>
+                    <span class="badge">y más...</span>
+                </div>
+            </div>
+
+            <!-- File info -->
+            <div class="file-selected" id="fileSelected">
+                <span class="file-icon">🎵</span>
+                <div class="file-info">
+                    <div class="file-name" id="fileName"></div>
+                    <div class="file-size" id="fileSize"></div>
+                </div>
+            </div>
+
+            <hr class="divider">
+
+            <!-- Opciones -->
+            <div class="options">
+                <div class="form-group">
+                    <label for="modelo">Modelo</label>
+                    <select name="modelo" id="modelo">
+                        <option value="tiny">tiny – Ultra rápido</option>
+                        <option value="base" selected>base – Rápido (recomendado)</option>
+                        <option value="small">small – Balanceado</option>
+                        <option value="medium">medium – Preciso</option>
+                        <option value="large">large – Máxima precisión</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="idioma">Idioma</label>
+                    <select name="idioma" id="idioma">
+                        <option value="">🌍 Detectar automáticamente</option>
+                        <option value="es">🇪🇸 Español</option>
+                        <option value="en">🇺🇸 Inglés</option>
+                        <option value="fr">🇫🇷 Francés</option>
+                        <option value="de">🇩🇪 Alemán</option>
+                        <option value="pt">🇧🇷 Portugués</option>
+                        <option value="it">🇮🇹 Italiano</option>
+                        <option value="ja">🇯🇵 Japonés</option>
+                        <option value="zh">🇨🇳 Chino</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- Botón -->
+            <button type="submit" class="btn-transcribir" id="btnTranscribir" disabled>
+                <span>🎙️</span> Transcribir Audio
+            </button>
+
+        </form>
+
+        <!-- Progreso -->
+        <div class="loading" id="loading">
+            <div class="loading-header">
+                <h4 id="loadingLabel">⚙️ Iniciando...</h4>
+                <span class="loading-pct" id="loadingPct">0%</span>
+            </div>
+            <div class="progress-bar-track">
+                <div class="progress-bar-fill" id="progressFill"></div>
+            </div>
+            <div class="loading-status">
+                <div class="dot-pulse">
+                    <span></span><span></span><span></span>
+                </div>
+                <span id="loadingDetail">Preparando transcripción...</span>
+            </div>
+        </div>
+
+        <!-- Error -->
+        <div class="error-msg" id="errorMsg">
+            <span>❌</span>
+            <span id="errorText"></span>
+        </div>
+
+        <!-- Resultado -->
+        <div class="result" id="result">
+            <hr class="divider">
+            <div class="result-header">
+                <h3>✅ Transcripción completada</h3>
+                <span class="result-meta" id="idiomaDetectado"></span>
+            </div>
+            <div class="result-text" id="resultText"></div>
+            <button class="btn-copy" id="btnCopy" onclick="copiarTexto()">
+                📋 Copiar texto
+            </button>
+            <p style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.75rem;">
+                💾 Guardado automáticamente en <code style="color: var(--accent2);">transcripciones/</code>
+            </p>
+        </div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('dropZone');
+        const audioInput = document.getElementById('audioInput');
+        const fileSelected = document.getElementById('fileSelected');
+        const fileName = document.getElementById('fileName');
+        const fileSize = document.getElementById('fileSize');
+        const btnTranscribir = document.getElementById('btnTranscribir');
+        const form = document.getElementById('formTranscribir');
+        const loading = document.getElementById('loading');
+        const result = document.getElementById('result');
+        const errorMsg = document.getElementById('errorMsg');
+
+        let selectedFile = null;
+        let pollingInterval = null;
+
+        // Labels de estado
+        const LABELS = {
+            iniciando: '⚙️ Iniciando...',
+            cargando_modelo: '🧠 Cargando modelo de IA...',
+            transcribiendo: '🎙️ Transcribiendo audio...',
+            guardando: '💾 Guardando transcripción...',
+            completado: '✅ ¡Completado!',
+            error: '❌ Error',
+        };
+        const DETALLE = {
+            iniciando: 'Preparando transcripción...',
+            cargando_modelo: 'Esto puede tardar unos segundos la primera vez.',
+            transcribiendo: 'Procesando el audio con Whisper...',
+            guardando: 'Guardando el resultado en transcripciones/',
+            completado: '¡Transcripción lista!',
+            error: 'Ocurrió un error durante la transcripción.',
+        };
+
+        // Drag & drop
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault(); dropZone.classList.remove('drag-over');
+            const file = e.dataTransfer.files[0];
+            if (file) setFile(file);
+        });
+        audioInput.addEventListener('change', () => {
+            if (audioInput.files[0]) setFile(audioInput.files[0]);
+        });
+
+        function setFile(file) {
+            selectedFile = file;
+            fileName.textContent = file.name;
+            const mb = (file.size / 1024 / 1024).toFixed(2);
+            fileSize.textContent = `${mb} MB`;
+            fileSelected.style.display = 'flex';
+            btnTranscribir.disabled = false;
+        }
+
+        function setProgreso(pct, estado) {
+            document.getElementById('progressFill').style.width = pct + '%';
+            document.getElementById('loadingPct').textContent = pct + '%';
+            document.getElementById('loadingLabel').textContent = LABELS[estado] || estado;
+            document.getElementById('loadingDetail').textContent = DETALLE[estado] || '';
+        }
+
+        function mostrarError(msg) {
+            loading.style.display = 'none';
+            errorMsg.style.display = 'flex';
+            document.getElementById('errorText').textContent = msg;
+            btnTranscribir.disabled = false;
+        }
+
+        function iniciarPolling(jobId) {
+            pollingInterval = setInterval(async () => {
+                try {
+                    const r = await fetch(`/progreso/${jobId}`);
+                    const data = await r.json();
+
+                    if (data.error && data.estado !== 'error') {
+                        clearInterval(pollingInterval);
+                        mostrarError(data.error);
+                        return;
+                    }
+
+                    setProgreso(data.progreso, data.estado);
+
+                    if (data.estado === 'completado') {
+                        clearInterval(pollingInterval);
+                        loading.style.display = 'none';
+                        document.getElementById('resultText').textContent = data.texto;
+                        document.getElementById('idiomaDetectado').textContent = `🌍 ${data.idioma}`;
+                        result.style.display = 'block';
+                        btnTranscribir.disabled = false;
+                    } else if (data.estado === 'error') {
+                        clearInterval(pollingInterval);
+                        mostrarError(data.error || 'Error desconocido.');
+                    }
+                } catch (e) {
+                    clearInterval(pollingInterval);
+                    mostrarError('Error de conexión con el servidor.');
+                }
+            }, 600);
+        }
+
+        // Submit
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const file = selectedFile || audioInput.files[0];
+            if (!file) return;
+
+            // Reset UI
+            result.style.display = 'none';
+            errorMsg.style.display = 'none';
+            loading.style.display = 'block';
+            btnTranscribir.disabled = true;
+            setProgreso(0, 'iniciando');
+
+            const formData = new FormData();
+            formData.append('audio', file);
+            formData.append('modelo', document.getElementById('modelo').value);
+            formData.append('idioma', document.getElementById('idioma').value);
+
+            try {
+                const res = await fetch('/transcribir', { method: 'POST', body: formData });
+                const data = await res.json();
+
+                if (!res.ok || data.error) {
+                    loading.style.display = 'none';
+                    mostrarError(data.error || 'Error al iniciar la transcripción.');
+                    return;
+                }
+
+                // Iniciar polling de progreso
+                iniciarPolling(data.job_id);
+
+            } catch (err) {
+                mostrarError('Error de conexión con el servidor.');
+            }
+        });
+
+        function copiarTexto() {
+            const texto = document.getElementById('resultText').textContent;
+            navigator.clipboard.writeText(texto).then(() => {
+                const btn = document.getElementById('btnCopy');
+                btn.textContent = '✅ ¡Copiado!';
+                setTimeout(() => { btn.innerHTML = '📋 Copiar texto'; }, 2000);
+            });
+        }
+    </script>
+
+</body>
+
+</html>

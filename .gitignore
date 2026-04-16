@@ -1,0 +1,30 @@
+# Entorno virtual
+venv/
+env/
+.env/
+
+# Archivos de audio subidos
+audios/
+*.mp3
+*.wav
+*.m4a
+*.ogg
+*.flac
+*.mp4
+
+# Transcripciones generadas
+transcripciones/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Modelos descargados por Whisper
+.cache/
+
+# IDE
+.vscode/
+.idea/
