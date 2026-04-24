@@ -233,6 +233,29 @@
             cursor: not-allowed;
         }
 
+        .btn-transcribir .spinner {
+            display: none;
+            width: 18px;
+            height: 18px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            flex-shrink: 0;
+        }
+
+        .btn-transcribir.loading-btn .spinner {
+            display: block;
+        }
+
+        .btn-transcribir.loading-btn .btn-icon {
+            display: none;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
         /* Loading / Progress */
         .loading {
             display: none;
@@ -427,6 +450,82 @@
             background: rgba(124, 92, 252, 0.1);
         }
 
+        /* Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.visible {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 2.5rem 2rem;
+            text-align: center;
+            max-width: 360px;
+            width: 90%;
+            box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+            animation: modalIn 0.3s ease;
+        }
+
+        @keyframes modalIn {
+            from { transform: scale(0.85); opacity: 0; }
+            to   { transform: scale(1);    opacity: 1; }
+        }
+
+        .modal .modal-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            display: block;
+        }
+
+        .modal h2 {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: var(--success);
+            margin-bottom: 0.5rem;
+        }
+
+        .modal p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 0.3rem;
+        }
+
+        .modal .tiempo {
+            font-size: 2.2rem;
+            font-weight: 700;
+            color: var(--accent2);
+            margin: 0.8rem 0 1.5rem;
+        }
+
+        .modal .btn-cerrar {
+            padding: 0.65rem 2rem;
+            background: linear-gradient(135deg, var(--accent), #5b3fd4);
+            border: none;
+            border-radius: 10px;
+            color: white;
+            font-family: 'Inter', sans-serif;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .modal .btn-cerrar:hover {
+            transform: translateY(-1px);
+        }
+
         /* Error */
         .error-msg {
             display: none;
@@ -533,7 +632,9 @@
 
             <!-- Botón -->
             <button type="submit" class="btn-transcribir" id="btnTranscribir" disabled>
-                <span>🎙️</span> Transcribir Audio
+                <div class="spinner"></div>
+                <span class="btn-icon">🎙️</span>
+                <span id="btnLabel">Transcribir Audio</span>
             </button>
 
         </form>
@@ -575,6 +676,17 @@
             <p style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.75rem;">
                 💾 Guardado automáticamente en <code style="color: var(--accent2);">transcripciones/</code>
             </p>
+        </div>
+    </div>
+
+    <!-- Modal tiempo -->
+    <div class="modal-overlay" id="modalOverlay">
+        <div class="modal">
+            <span class="modal-icon">⚡</span>
+            <h2>¡Transcripción completada!</h2>
+            <p>Tiempo total</p>
+            <div class="tiempo" id="modalTiempo">--</div>
+            <button class="btn-cerrar" onclick="cerrarModal()">Ver resultado</button>
         </div>
     </div>
 
@@ -639,11 +751,22 @@
             document.getElementById('loadingDetail').textContent = DETALLE[estado] || '';
         }
 
+        function setBtnLoading(active) {
+            if (active) {
+                btnTranscribir.classList.add('loading-btn');
+                document.getElementById('btnLabel').textContent = 'Transcribiendo...';
+            } else {
+                btnTranscribir.classList.remove('loading-btn');
+                document.getElementById('btnLabel').textContent = 'Transcribir Audio';
+            }
+        }
+
         function mostrarError(msg) {
             loading.style.display = 'none';
             errorMsg.style.display = 'flex';
             document.getElementById('errorText').textContent = msg;
             btnTranscribir.disabled = false;
+            setBtnLoading(false);
         }
 
         function iniciarPolling(jobId) {
@@ -667,6 +790,8 @@
                         document.getElementById('idiomaDetectado').textContent = `🌍 ${data.idioma}`;
                         result.style.display = 'block';
                         btnTranscribir.disabled = false;
+                        setBtnLoading(false);
+                        mostrarModal(data.tiempo_segundos || 0);
                     } else if (data.estado === 'error') {
                         clearInterval(pollingInterval);
                         mostrarError(data.error || 'Error desconocido.');
@@ -690,6 +815,7 @@
             errorMsg.style.display = 'none';
             loading.style.display = 'block';
             btnTranscribir.disabled = true;
+            setBtnLoading(true);
             setProgreso(0, 'iniciando');
 
             const formData = new FormData();
@@ -714,6 +840,21 @@
                 mostrarError('Error de conexión con el servidor.');
             }
         });
+
+        function formatTiempo(s) {
+            if (s < 60) return `${s} seg`;
+            const m = Math.floor(s / 60), r = s % 60;
+            return r > 0 ? `${m} min ${r} seg` : `${m} min`;
+        }
+
+        function mostrarModal(segundos) {
+            document.getElementById('modalTiempo').textContent = formatTiempo(segundos);
+            document.getElementById('modalOverlay').classList.add('visible');
+        }
+
+        function cerrarModal() {
+            document.getElementById('modalOverlay').classList.remove('visible');
+        }
 
         function copiarTexto() {
             const texto = document.getElementById('resultText').textContent;

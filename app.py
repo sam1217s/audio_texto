@@ -8,6 +8,15 @@ import time
 
 import os
 import uuid
+
+# Asegurar que FFmpeg esté disponible para Python y Whisper
+_FFMPEG_BIN = os.path.expandvars(
+    r"%LOCALAPPDATA%\Microsoft\WinGet\Packages"
+    r"\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe"
+    r"\ffmpeg-8.1-full_build\bin"
+)
+if os.path.isdir(_FFMPEG_BIN) and _FFMPEG_BIN not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = _FFMPEG_BIN + os.pathsep + os.environ.get("PATH", "")
 import threading
 import whisper
 import subprocess
@@ -70,9 +79,12 @@ def simular_progreso(job_id: str, duracion_audio: float, modelo_nombre: str):
         if estado in ('completado', 'error', 'guardando'):
             break
         elapsed = time.time() - inicio
-        # Avanza de 10% a 90% durante el tiempo estimado (curva suave)
         ratio = min(elapsed / tiempo_estimado, 1.0)
         pct = int(10 + ratio * 80)
+        # Si ya llegó al 90%, avanza muy lentamente para no congelarse
+        if pct >= 90:
+            extra = min(int((elapsed - tiempo_estimado) * 0.08), 4)
+            pct = 90 + extra
         if jobs[job_id]['progreso'] < pct:
             jobs[job_id]['progreso'] = pct
         time.sleep(0.4)
@@ -82,6 +94,7 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
                    idioma, nombre_archivo_original: str):
     """Transcribe el audio en un hilo separado y actualiza el progreso."""
     try:
+        tiempo_inicio = time.time()
         jobs[job_id]["estado"] = "cargando_modelo"
         jobs[job_id]["progreso"] = 5
 
@@ -132,12 +145,14 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
         if Path(ruta_audio).exists():
             os.remove(ruta_audio)
 
+        segundos = round(time.time() - tiempo_inicio)
         jobs[job_id].update({
             "estado": "completado",
             "progreso": 100,
             "texto": texto,
             "idioma": idioma_detectado,
-            "archivo_guardado": nombre_txt
+            "archivo_guardado": nombre_txt,
+            "tiempo_segundos": segundos
         })
 
     except Exception as e:
@@ -213,4 +228,6 @@ if __name__ == "__main__":
     print("Abre tu navegador en: http://localhost:5200")
     print("Presiona Ctrl+C para detener el servidor.")
     print("=" * 50)
+    import threading, webbrowser
+    threading.Timer(1.5, lambda: webbrowser.open("http://localhost:5200")).start()
     app.run(debug=False, host="0.0.0.0", port=5200, threaded=True)
