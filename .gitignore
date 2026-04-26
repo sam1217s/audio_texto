@@ -1,6 +1,7 @@
-# Entorno virtual
+# Entorno virtual / variables sensibles
 venv/
 env/
+.env
 .env/
 
 # Archivos de audio subidos

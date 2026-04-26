@@ -1,3 +1,6 @@
 openai-whisper
 flask
 ffmpeg-python
+pyannote.audio
+python-dotenv
+soundfile
