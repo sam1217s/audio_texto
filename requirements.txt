@@ -4,3 +4,4 @@ ffmpeg-python
 pyannote.audio
 python-dotenv
 soundfile
+fpdf2

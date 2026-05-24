@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python graph.py cerebro)",
+      "Bash(python graph.py detective)",
+      "Bash(python graph-hook.py)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"C:\\Users\\Jhaider\\OneDrive\\Desktop\\audio_texto\" && python graph-hook.py",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"C:\\Users\\Jhaider\\OneDrive\\Desktop\\audio_texto\" && python graph-posttool.py",
+            "timeout": 20,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

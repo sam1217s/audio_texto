@@ -927,6 +927,61 @@
         .btn-nueva:hover {
             background: rgba(248, 113, 113, 0.3);
         }
+
+        /* Reproductor principal con seguimiento */
+        .player-row {
+            display: none;
+            margin-bottom: 0.8rem;
+        }
+
+        .player-row audio {
+            width: 100%;
+            border-radius: 10px;
+            background: var(--surface2);
+        }
+
+        /* Resultado en segmentos clicables */
+        .result-text {
+            line-height: 1.7;
+        }
+
+        .seg {
+            display: block;
+            padding: 0.45rem 0.7rem;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.15s;
+            margin-bottom: 0.15rem;
+        }
+
+        .seg:hover {
+            background: rgba(124, 92, 252, 0.1);
+        }
+
+        .seg.active {
+            background: rgba(124, 92, 252, 0.25);
+            box-shadow: inset 3px 0 0 var(--accent);
+        }
+
+        .seg .seg-spk {
+            font-weight: 600;
+            color: var(--accent2);
+            margin-right: 0.4rem;
+        }
+
+        .seg .seg-time {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            margin-right: 0.4rem;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .result-actions {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+            flex-wrap: wrap;
+        }
     </style>
 </head>
 
@@ -1091,10 +1146,24 @@
                         </button>
                     </div>
 
+                    <!-- Reproductor con seguimiento -->
+                    <div class="player-row" id="playerRow">
+                        <audio id="mainPlayer" controls preload="metadata"></audio>
+                    </div>
+
                     <div class="result-text" id="resultText"></div>
-                    <button class="btn-copy" id="btnCopy" onclick="copiarTexto()">
-                        📋 Copiar texto
-                    </button>
+
+                    <div class="result-actions">
+                        <button class="btn-copy" id="btnCopy" onclick="copiarTexto()">
+                            📋 Copiar
+                        </button>
+                        <button class="btn-copy" id="btnDescargarTxt" onclick="descargar('txt')">
+                            📄 TXT
+                        </button>
+                        <button class="btn-copy" id="btnDescargarPdf" onclick="descargar('pdf')">
+                            📕 PDF
+                        </button>
+                    </div>
                     <p style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.75rem;">
                         💾 Guardado automáticamente en <code style="color: var(--accent2);">transcripciones/</code>
                     </p>
@@ -1134,6 +1203,8 @@
         let selectedFile = null;
         let pollingInterval = null;
         let currentJobId = null;
+        let currentSegmentos = [];
+        let mapeoNombres = {};   // SPEAKER_XX -> nombre real (después de aplicar)
 
         // Labels de estado
         const LABELS = {
@@ -1238,7 +1309,9 @@
                     if (data.estado === 'completado') {
                         clearInterval(pollingInterval);
                         loading.style.display = 'none';
-                        document.getElementById('resultText').textContent = data.texto;
+                        currentSegmentos = data.segmentos || [];
+                        renderResultado(data.texto, currentSegmentos);
+                        configurarReproductor(currentJobId);
                         document.getElementById('idiomaDetectado').textContent = `🌍 ${data.idioma}`;
                         result.style.display = 'flex';
                         renderSpeakersPanel(data.texto, data.muestras_hablantes || {});
@@ -1249,6 +1322,7 @@
                             texto: data.texto,
                             idioma: data.idioma,
                             muestras: data.muestras_hablantes || {},
+                            segmentos: currentSegmentos,
                             tiempo: data.tiempo_segundos || 0,
                             archivo: data.archivo_guardado || null,
                         });
@@ -1277,6 +1351,10 @@
             document.getElementById('emptyState').style.display = 'none';
             document.getElementById('speakersPanel').style.display = 'none';
             document.getElementById('speakersList').innerHTML = '';
+            document.getElementById('mainPlayer').src = '';
+            document.getElementById('playerRow').style.display = 'none';
+            currentSegmentos = [];
+            mapeoNombres = {};
             loading.style.display = 'block';
             btnTranscribir.disabled = true;
             setBtnLoading(true);
@@ -1463,6 +1541,18 @@
             } catch (e) {}
         }
 
+        function actualizarEstadoTrasRenombrar(nuevoTexto, mapeo) {
+            try {
+                const raw = localStorage.getItem(STORAGE_KEY);
+                if (!raw) return;
+                const estado = JSON.parse(raw);
+                estado.texto = nuevoTexto;
+                estado.muestras = {};
+                estado.mapeoNombres = Object.assign(estado.mapeoNombres || {}, mapeo);
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(estado));
+            } catch (e) {}
+        }
+
         function leerEstado() {
             try {
                 const raw = localStorage.getItem(STORAGE_KEY);
@@ -1478,14 +1568,22 @@
 
         function nuevaTranscripcion() {
             if (!confirm('¿Limpiar la transcripción actual y empezar otra?')) return;
+            // Pedir al backend que borre el audio guardado de este job
+            if (currentJobId) {
+                fetch(`/eliminar/${currentJobId}`, { method: 'POST' }).catch(() => {});
+            }
             limpiarEstado();
             result.style.display = 'none';
             document.getElementById('emptyState').style.display = 'flex';
-            document.getElementById('resultText').textContent = '';
+            document.getElementById('resultText').innerHTML = '';
             document.getElementById('speakersPanel').style.display = 'none';
             document.getElementById('speakersList').innerHTML = '';
             document.getElementById('audioPlayer').src = '';
+            document.getElementById('mainPlayer').src = '';
+            document.getElementById('playerRow').style.display = 'none';
             currentJobId = null;
+            currentSegmentos = [];
+            mapeoNombres = {};
             clearFile();
         }
 
@@ -1494,29 +1592,142 @@
             if (!estado || !estado.texto) return;
 
             currentJobId = estado.jobId;
+            currentSegmentos = estado.segmentos || [];
+            mapeoNombres = estado.mapeoNombres || {};
             document.getElementById('emptyState').style.display = 'none';
-            document.getElementById('resultText').textContent = estado.texto;
+            renderResultado(estado.texto, currentSegmentos);
             document.getElementById('idiomaDetectado').textContent =
                 `🌍 ${estado.idioma || 'desconocido'}`;
             result.style.display = 'flex';
 
-            // Si el texto trae [SPEAKER_XX], renderizar el panel.
-            // Si el audio del job ya no existe en el backend, deshabilitamos play.
+            // Configurar reproductor solo si el audio aún existe en backend
+            let audioOk = false;
+            if (estado.jobId) {
+                try {
+                    const r = await fetch(`/audio/${estado.jobId}`, { method: 'HEAD' });
+                    audioOk = r.ok;
+                } catch (e) {}
+            }
+            if (audioOk) {
+                configurarReproductor(estado.jobId);
+            } else {
+                document.getElementById('playerRow').style.display = 'none';
+            }
+
+            // Si el texto trae [SPEAKER_XX], renderizar el panel
             const tieneSpeakers = /\[SPEAKER_\d+\]/.test(estado.texto);
             if (tieneSpeakers) {
-                let audioOk = false;
-                if (estado.jobId) {
-                    try {
-                        const r = await fetch(`/audio/${estado.jobId}`, { method: 'HEAD' });
-                        audioOk = r.ok;
-                    } catch (e) {}
-                }
                 renderSpeakersPanel(estado.texto, audioOk ? (estado.muestras || {}) : {});
             }
         }
 
         // Restaurar al cargar
         window.addEventListener('DOMContentLoaded', restaurarEstado);
+
+        // ===== Render de resultado en segmentos clicables =====
+        function fmtTime(s) {
+            s = Math.max(0, Math.floor(s));
+            const m = Math.floor(s / 60);
+            const r = s % 60;
+            return `${m}:${r.toString().padStart(2, '0')}`;
+        }
+
+        function nombreParaSpeaker(spk) {
+            if (!spk) return '';
+            return mapeoNombres[spk] || spk;
+        }
+
+        function renderResultado(texto, segmentos) {
+            const cont = document.getElementById('resultText');
+            cont.innerHTML = '';
+
+            if (!segmentos || segmentos.length === 0) {
+                // Sin timestamps por segmento: solo texto plano (no hay karaoke posible)
+                cont.textContent = texto || '';
+                return;
+            }
+
+            segmentos.forEach((s, idx) => {
+                const seg = document.createElement('div');
+                seg.className = 'seg';
+                seg.dataset.idx = idx;
+                seg.dataset.start = s.start;
+                seg.dataset.end = s.end;
+                const spkLabel = s.speaker ? nombreParaSpeaker(s.speaker) : '';
+                seg.innerHTML = `
+                    <span class="seg-time">${fmtTime(s.start)}</span>
+                    ${spkLabel ? `<span class="seg-spk">[${escapeHtml(spkLabel)}]</span>` : ''}
+                    <span class="seg-text">${escapeHtml(s.text || '')}</span>
+                `;
+                seg.addEventListener('click', () => {
+                    const audio = document.getElementById('mainPlayer');
+                    if (!audio.src) return;
+                    audio.currentTime = s.start;
+                    audio.play();
+                });
+                cont.appendChild(seg);
+            });
+        }
+
+        // ===== Reproductor con seguimiento (karaoke) =====
+        function configurarReproductor(jobId) {
+            const player = document.getElementById('mainPlayer');
+            const playerRow = document.getElementById('playerRow');
+            if (!jobId) {
+                playerRow.style.display = 'none';
+                player.removeAttribute('src');
+                return;
+            }
+            player.src = `/audio/${jobId}`;
+            playerRow.style.display = 'block';
+
+            // Si el audio no existe en backend (404), ocultamos el reproductor
+            player.addEventListener('error', () => {
+                playerRow.style.display = 'none';
+            }, { once: true });
+
+            // Seguimiento del segmento actual
+            player.addEventListener('timeupdate', actualizarSegmentoActivo);
+        }
+
+        let _lastActiveIdx = -1;
+        function actualizarSegmentoActivo() {
+            const player = document.getElementById('mainPlayer');
+            const t = player.currentTime;
+            if (!currentSegmentos.length) return;
+
+            // Búsqueda lineal — para audios largos podríamos hacer binary search,
+            // pero con miles de segmentos sigue siendo barato.
+            let idx = -1;
+            for (let i = 0; i < currentSegmentos.length; i++) {
+                const s = currentSegmentos[i];
+                if (t >= s.start && t <= s.end) { idx = i; break; }
+                if (t < s.start) break;
+            }
+            if (idx === _lastActiveIdx) return;
+
+            // Quitar highlight anterior
+            const prev = document.querySelector('.seg.active');
+            if (prev) prev.classList.remove('active');
+
+            if (idx >= 0) {
+                const el = document.querySelector(`.seg[data-idx="${idx}"]`);
+                if (el) {
+                    el.classList.add('active');
+                    el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                }
+            }
+            _lastActiveIdx = idx;
+        }
+
+        // ===== Descargas =====
+        function descargar(formato) {
+            if (!currentJobId) {
+                alert('No hay transcripción disponible para descargar.');
+                return;
+            }
+            window.location.href = `/descargar/${currentJobId}/${formato}`;
+        }
 
         async function aplicarNombres() {
             if (!currentJobId) return;
@@ -1552,11 +1763,12 @@
                     return;
                 }
 
-                document.getElementById('resultText').textContent = data.texto;
-                // Tras aplicar nombres, ya no hay SPEAKER_XX ni audio disponible
+                // Guardar el mapeo y re-renderizar segmentos con los nombres reales
+                Object.assign(mapeoNombres, mapeo);
+                renderResultado(data.texto, currentSegmentos);
                 document.getElementById('speakersPanel').style.display = 'none';
                 document.getElementById('audioPlayer').src = '';
-                actualizarTextoEnEstado(data.texto);
+                actualizarEstadoTrasRenombrar(data.texto, mapeoNombres);
                 btn.textContent = '✅ Nombres aplicados';
                 setTimeout(() => { btn.textContent = 'Aplicar nombres'; }, 2000);
             } catch (e) {

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-Transcriptor de Audio con Whisper - SANDBOX (community-1)
-Variante experimental para probar pyannote/speaker-diarization-community-1.
+Transcriptor de Audio con Whisper + Reconocimiento de voz
+=========================================================
 
-Ejecutar:  python "app copy.py"
-Abrir:     http://localhost:5201
+Variante de app.py con biblioteca de voces persistente. Antes de transcribir
+seleccionas qué hablantes están en el audio; tras la diarización el sistema
+asigna sus nombres reales automáticamente comparando embeddings de voz.
+
+Ejecutar:  python appmodel.py
+Abrir:     http://localhost:5202
 
 Funciona en paralelo con app.py (puerto 5200) sin conflicto.
 """
@@ -59,9 +63,212 @@ try:
 except Exception:
     pass
 
+# === Reconocimiento de voz ===
+CARPETA_VOCES = Path("voces")
+CARPETA_VOCES.mkdir(exist_ok=True)
+ARCHIVO_VOCES = CARPETA_VOCES / "voces.json"
+# Umbral mínimo de similitud coseno para asignar un nombre. Por debajo, el
+# hablante queda como SPEAKER_XX para que el usuario lo renombre a mano.
+UMBRAL_SIMILITUD_VOZ = 0.55
+# Duración objetivo de la muestra de voz que extraemos para hacer matching.
+DURACION_MUESTRA_MATCHING = 30.0  # segundos
+
 # Pipeline de diarización (lazy load)
 _diarization_pipeline = None
 _diarization_lock = threading.Lock()
+# Modelo de embeddings de voz (lazy load)
+_embedding_model = None
+_embedding_lock = threading.Lock()
+
+
+def get_embedding_model():
+    """Carga el modelo de embeddings de voz la primera vez que se usa."""
+    global _embedding_model
+    with _embedding_lock:
+        if _embedding_model is None:
+            from pyannote.audio import Model
+            from pyannote.audio import Inference
+            import torch
+            modelo = Model.from_pretrained(
+                "pyannote/embedding", use_auth_token=HF_TOKEN
+            )
+            if torch.cuda.is_available():
+                modelo = modelo.to(torch.device("cuda"))
+                print("[embeddings] Modelo movido a GPU")
+            # window="whole" → un solo embedding por audio completo
+            _embedding_model = Inference(modelo, window="whole")
+            print("[embeddings] pyannote/embedding listo")
+    return _embedding_model
+
+
+def cargar_biblioteca_voces() -> dict:
+    """Lee voces.json. Devuelve {nombre: [embedding...]}."""
+    if not ARCHIVO_VOCES.exists():
+        return {}
+    try:
+        return json.loads(ARCHIVO_VOCES.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def guardar_biblioteca_voces(biblioteca: dict) -> None:
+    ARCHIVO_VOCES.write_text(
+        json.dumps(biblioteca, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
+
+
+def calcular_embedding(ruta_audio: str) -> list:
+    """Saca un embedding de voz de un audio. Devuelve lista de floats."""
+    inference = get_embedding_model()
+    # pyannote acepta directamente la ruta; convierte internamente con torchaudio.
+    # Pero como tenemos torchcodec roto, convertimos antes a WAV mono 16kHz.
+    ruta_wav = str(Path(ruta_audio).with_suffix(".embed.wav"))
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(ruta_audio),
+         "-ac", "1", "-ar", "16000", "-vn", ruta_wav],
+        capture_output=True, check=True
+    )
+    try:
+        import soundfile as sf
+        import torch as _torch
+        wav_np, sr = sf.read(ruta_wav, always_2d=True)
+        wav = _torch.from_numpy(wav_np.T).float()
+        emb = inference({"waveform": wav, "sample_rate": sr})
+        # `emb` es un numpy array 1D; lo serializamos como lista
+        return [float(x) for x in emb]
+    finally:
+        if Path(ruta_wav).exists():
+            os.remove(ruta_wav)
+
+
+def similitud_coseno(a: list, b: list) -> float:
+    """Cosine similarity entre dos vectores (listas de floats)."""
+    import math
+    if len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0 or nb == 0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def asignar_nombres_por_voz(ruta_audio_completo: str, segs_con_hablante,
+                            nombres_esperados: list) -> dict:
+    """Para cada SPEAKER_XX detectado, extrae un fragmento de su audio y lo
+    compara con las voces registradas indicadas en `nombres_esperados`. Usa
+    matching óptimo (algoritmo húngaro) para evitar duplicar nombres.
+    Devuelve {SPEAKER_XX: nombre_real} solo para los que superen el umbral.
+    """
+    biblioteca = cargar_biblioteca_voces()
+    voces_candidatas = {n: biblioteca[n] for n in nombres_esperados if n in biblioteca}
+    if not voces_candidatas or not segs_con_hablante:
+        return {}
+
+    # Agrupar segmentos por hablante
+    por_hablante = {}
+    for s in segs_con_hablante:
+        por_hablante.setdefault(s["speaker"], []).append(s)
+
+    # Para cada hablante, recortar ~30 s de su audio (concatenando segmentos)
+    # y extraer embedding.
+    embeddings_hablantes = {}
+    audios_temp = []
+    try:
+        for spk, segs in por_hablante.items():
+            # Tomamos los segmentos del centro del audio del hablante para
+            # evitar extremos donde la voz puede estar distorsionada.
+            duracion_total = sum(float(s["end"]) - float(s["start"]) for s in segs)
+            if duracion_total < 3.0:
+                continue  # menos de 3 s no es fiable
+
+            # Extraer un único fragmento contiguo de hasta DURACION_MUESTRA_MATCHING
+            # segundos. Es más simple y robusto que concatenar trozos.
+            mejor_inicio = float(segs[0]["start"])
+            mejor_fin = float(segs[0]["end"])
+            for s in segs:
+                fin = float(s["end"])
+                if fin - mejor_inicio <= DURACION_MUESTRA_MATCHING:
+                    mejor_fin = fin
+                else:
+                    break
+
+            ruta_recorte = str(CARPETA_AUDIOS / f"_match_{spk}_{uuid.uuid4().hex[:6]}.wav")
+            audios_temp.append(ruta_recorte)
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(ruta_audio_completo),
+                 "-ss", f"{mejor_inicio:.2f}",
+                 "-to", f"{mejor_fin:.2f}",
+                 "-ac", "1", "-ar", "16000", "-vn", ruta_recorte],
+                capture_output=True, check=True
+            )
+            try:
+                emb = calcular_embedding(ruta_recorte)
+                embeddings_hablantes[spk] = emb
+            except Exception as e:
+                print(f"[matching] No se pudo extraer embedding de {spk}: {e}")
+
+        if not embeddings_hablantes:
+            return {}
+
+        # Matriz de similitud: filas = SPEAKER_XX, columnas = nombres candidatos
+        spk_lista = list(embeddings_hablantes.keys())
+        nombres_lista = list(voces_candidatas.keys())
+        matriz = []
+        for spk in spk_lista:
+            fila = []
+            for nombre in nombres_lista:
+                sim = similitud_coseno(
+                    embeddings_hablantes[spk], voces_candidatas[nombre]
+                )
+                fila.append(sim)
+            matriz.append(fila)
+
+        # Asignación óptima 1-a-1 con scipy si está, si no greedy.
+        asignaciones = {}
+        try:
+            import numpy as np
+            from scipy.optimize import linear_sum_assignment
+            costo = -np.array(matriz)  # negamos porque maximizamos similitud
+            # linear_sum_assignment requiere matriz cuadrada o trabaja con la mínima dimensión
+            row_idx, col_idx = linear_sum_assignment(costo)
+            for r, c in zip(row_idx, col_idx):
+                if matriz[r][c] >= UMBRAL_SIMILITUD_VOZ:
+                    asignaciones[spk_lista[r]] = nombres_lista[c]
+        except Exception:
+            # Fallback: greedy ordenado por mejor similitud global
+            usados_spk = set()
+            usados_nom = set()
+            pares = []
+            for i, spk in enumerate(spk_lista):
+                for j, nom in enumerate(nombres_lista):
+                    pares.append((matriz[i][j], i, j))
+            pares.sort(reverse=True)
+            for sim, i, j in pares:
+                if sim < UMBRAL_SIMILITUD_VOZ:
+                    break
+                if i in usados_spk or j in usados_nom:
+                    continue
+                asignaciones[spk_lista[i]] = nombres_lista[j]
+                usados_spk.add(i)
+                usados_nom.add(j)
+
+        # Log informativo
+        for spk, nombre in asignaciones.items():
+            i = spk_lista.index(spk)
+            j = nombres_lista.index(nombre)
+            print(f"[matching] {spk} → {nombre} (similitud {matriz[i][j]:.3f})")
+
+        return asignaciones
+    finally:
+        for r in audios_temp:
+            if Path(r).exists():
+                try:
+                    os.remove(r)
+                except Exception:
+                    pass
 
 
 def get_diarization_pipeline():
@@ -71,8 +278,9 @@ def get_diarization_pipeline():
         if _diarization_pipeline is None:
             from pyannote.audio import Pipeline
             import torch
-            # SANDBOX (app copy.py): probamos primero el modelo nuevo
-            # (community-1) para ver si separa mejor los hablantes que 3.1.
+            # community-1 separa mejor los hablantes y usa GPU también para el
+            # clustering. 3.1 queda como fallback público por si community-1 no
+            # está accesible para el token.
             modelos = [
                 "pyannote/speaker-diarization-community-1",
                 "pyannote/speaker-diarization-3.1",
@@ -276,7 +484,7 @@ def obtener_duracion(ruta_audio: str) -> float:
 
 def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
                    idioma, nombre_archivo_original: str, diarizar: bool = False,
-                   num_hablantes=None):
+                   num_hablantes=None, nombres_esperados=None):
     """Transcribe el audio en un hilo separado y actualiza el progreso."""
     try:
         tiempo_inicio = time.time()
@@ -303,6 +511,14 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
         texto = resultado["text"].strip()
         idioma_detectado = resultado.get("language", "desconocido")
         texto_final = texto
+
+        # Guardar siempre los segmentos de Whisper para el reproductor con seguimiento.
+        # Si luego se diariza, se sobrescriben con los que tienen hablante.
+        jobs[job_id]["segmentos"] = [
+            {"start": float(s["start"]), "end": float(s["end"]),
+             "speaker": None, "text": s["text"].strip()}
+            for s in resultado.get("segments", [])
+        ]
 
         if diarizar:
             if not HF_TOKEN:
@@ -366,9 +582,47 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
             )
             if Path(ruta_wav).exists():
                 os.remove(ruta_wav)
-            segs_con_hablante = asignar_hablantes(resultado["segments"], diarizacion)
-            texto_final = formatear_diarizacion(segs_con_hablante)
-            jobs[job_id]["muestras_hablantes"] = extraer_muestras_hablantes(segs_con_hablante)
+
+            # Comprobar si pyannote detectó al menos un turno de hablante
+            _anotacion_check = diarizacion.speaker_diarization if hasattr(diarizacion, "speaker_diarization") else diarizacion
+            _turnos_detectados = list(_anotacion_check.itertracks(yield_label=True))
+
+            if not _turnos_detectados:
+                # pyannote no detectó hablantes: usar texto plano sin etiquetas ni timestamps
+                print("[diarización] No se detectaron hablantes — usando texto plano.")
+                jobs[job_id]["muestras_hablantes"] = {}
+                jobs[job_id]["mapeo_auto"] = {}
+                jobs[job_id]["segmentos"] = []
+            else:
+                segs_con_hablante = asignar_hablantes(resultado["segments"], diarizacion)
+
+                # === Reconocimiento de voz ===
+                # Si el usuario indicó qué hablantes esperaba, intentamos asignar
+                # nombres reales comparando embeddings con la biblioteca.
+                mapeo_auto = {}
+                if nombres_esperados:
+                    jobs[job_id]["estado"] = "identificando_voces"
+                    jobs[job_id]["progreso"] = 97
+                    try:
+                        mapeo_auto = asignar_nombres_por_voz(
+                            ruta_audio, segs_con_hablante, nombres_esperados
+                        )
+                        if mapeo_auto:
+                            # Reescribir cada segmento con el nombre real
+                            for s in segs_con_hablante:
+                                if s["speaker"] in mapeo_auto:
+                                    s["speaker"] = mapeo_auto[s["speaker"]]
+                    except Exception as e:
+                        print(f"[matching] Falló identificación de voces: {e}")
+
+                texto_final = formatear_diarizacion(segs_con_hablante)
+                jobs[job_id]["muestras_hablantes"] = extraer_muestras_hablantes(segs_con_hablante)
+                jobs[job_id]["mapeo_auto"] = mapeo_auto
+                jobs[job_id]["segmentos"] = [
+                    {"start": float(s["start"]), "end": float(s["end"]),
+                     "speaker": s["speaker"], "text": s["text"]}
+                    for s in segs_con_hablante
+                ]
 
         jobs[job_id]["progreso"] = 98
         jobs[job_id]["estado"] = "guardando"
@@ -388,10 +642,8 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
             f.write("-" * 50 + "\n\n")
             f.write(texto_final)
 
-        # Si hubo diarización, conservamos el audio para poder reproducir
-        # fragmentos de cada hablante. Si no, lo borramos como antes.
-        if not diarizar and Path(ruta_audio).exists():
-            os.remove(ruta_audio)
+        # Conservamos el audio para el reproductor con seguimiento. Se elimina
+        # cuando el usuario pulse "Nueva transcripción" o al reiniciar el server.
 
         segundos = round(time.time() - tiempo_inicio)
         jobs[job_id].update({
@@ -401,7 +653,7 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
             "idioma": idioma_detectado,
             "archivo_guardado": nombre_txt,
             "tiempo_segundos": segundos,
-            "ruta_audio": str(ruta_audio) if diarizar else None,
+            "ruta_audio": str(ruta_audio),
         })
 
     except Exception as e:
@@ -416,7 +668,7 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index_modelvoz.html")
 
 
 @app.route("/transcribir", methods=["POST"])
@@ -439,6 +691,18 @@ def transcribir():
     except ValueError:
         num_hablantes = None
 
+    # Lista de nombres de voces ya registradas que esperamos en este audio.
+    # Llega como JSON-string o como múltiples campos "nombres_esperados[]".
+    nombres_esperados = request.form.getlist("nombres_esperados") or []
+    raw = request.form.get("nombres_esperados_json", "")
+    if raw:
+        try:
+            extra = json.loads(raw)
+            if isinstance(extra, list):
+                nombres_esperados = extra
+        except Exception:
+            pass
+
     # Guardar archivo
     extension = archivo.filename.rsplit(".", 1)[1].lower()
     nombre_unico = f"{uuid.uuid4().hex}.{extension}"
@@ -460,7 +724,7 @@ def transcribir():
     hilo = threading.Thread(
         target=procesar_audio,
         args=(job_id, str(ruta_audio), modelo_nombre, idioma,
-              archivo.filename, diarizar, num_hablantes),
+              archivo.filename, diarizar, num_hablantes, nombres_esperados),
         daemon=True
     )
     hilo.start()
@@ -530,7 +794,18 @@ def renombrar(job_id):
             except Exception as e:
                 return jsonify({"error": f"No se pudo actualizar el archivo: {e}"}), 500
 
-    # Ya identificaste a los hablantes: el audio temporal ya no se necesita.
+    # Conservamos el audio después de renombrar para que el reproductor con
+    # seguimiento (karaoke) siga funcionando. Se elimina solo al pulsar
+    # "Nueva transcripción" o al reiniciar el server.
+    return jsonify({"texto": texto, "archivo_guardado": nombre_txt})
+
+
+@app.route("/eliminar/<job_id>", methods=["POST"])
+def eliminar_job(job_id):
+    """Elimina el audio asociado a un job (al pulsar 'Nueva transcripción')."""
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"ok": True})
     ruta_audio = job.get("ruta_audio")
     if ruta_audio and Path(ruta_audio).exists():
         try:
@@ -538,18 +813,186 @@ def renombrar(job_id):
         except Exception:
             pass
     job["ruta_audio"] = None
+    return jsonify({"ok": True})
 
-    return jsonify({"texto": texto, "archivo_guardado": nombre_txt})
+
+@app.route("/descargar/<job_id>/<formato>")
+def descargar(job_id, formato):
+    """Descarga la transcripción como TXT o PDF."""
+    job = jobs.get(job_id)
+    if not job or not job.get("texto"):
+        return jsonify({"error": "Transcripción no disponible."}), 404
+
+    nombre_txt = job.get("archivo_guardado") or "transcripcion.txt"
+    nombre_base = Path(nombre_txt).stem
+
+    if formato == "txt":
+        ruta_txt = CARPETA_TRANSCRIPCIONES / nombre_txt
+        if not ruta_txt.exists():
+            ruta_txt = CARPETA_TRANSCRIPCIONES / f"{nombre_base}.txt"
+            ruta_txt.write_text(job["texto"], encoding="utf-8")
+        return send_file(str(ruta_txt), as_attachment=True,
+                         download_name=f"{nombre_base}.txt",
+                         mimetype="text/plain; charset=utf-8")
+
+    if formato == "pdf":
+        from fpdf import FPDF
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
+
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.cell(0, 10, "Transcripción", ln=True)
+        pdf.set_font("Helvetica", size=10)
+        pdf.set_text_color(110, 110, 110)
+        pdf.cell(0, 6, f"Idioma detectado: {job.get('idioma', '?')}", ln=True)
+        pdf.cell(0, 6, f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True)
+        if job.get("tiempo_segundos"):
+            pdf.cell(0, 6, f"Tiempo de procesamiento: {job['tiempo_segundos']} s", ln=True)
+        pdf.ln(4)
+        pdf.set_draw_color(200, 200, 200)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(4)
+
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", size=11)
+        for parrafo in (job["texto"] or "").split("\n"):
+            if not parrafo.strip():
+                pdf.ln(3)
+                continue
+            try:
+                pdf.multi_cell(0, 6, parrafo)
+            except Exception:
+                pdf.multi_cell(0, 6, parrafo.encode("latin-1", "replace").decode("latin-1"))
+
+        ruta_pdf = CARPETA_TRANSCRIPCIONES / f"{nombre_base}.pdf"
+        pdf.output(str(ruta_pdf))
+        return send_file(str(ruta_pdf), as_attachment=True,
+                         download_name=f"{nombre_base}.pdf",
+                         mimetype="application/pdf")
+
+    return jsonify({"error": "Formato no soportado. Usa txt o pdf."}), 400
+
+
+# ===== Biblioteca de voces (CRUD + registro desde job) =====
+
+@app.route("/voces", methods=["GET"])
+def listar_voces():
+    """Devuelve la lista de nombres registrados (sin los embeddings)."""
+    biblioteca = cargar_biblioteca_voces()
+    return jsonify({"voces": sorted(biblioteca.keys())})
+
+
+@app.route("/voces/registrar", methods=["POST"])
+def registrar_voz():
+    """Registra una voz nueva. Recibe: nombre + archivo de audio."""
+    nombre = (request.form.get("nombre") or "").strip()
+    if not nombre:
+        return jsonify({"error": "Falta el nombre."}), 400
+    if "audio" not in request.files:
+        return jsonify({"error": "Falta el archivo de audio."}), 400
+
+    archivo = request.files["audio"]
+    if archivo.filename == "":
+        return jsonify({"error": "Archivo vacío."}), 400
+    if not extension_permitida(archivo.filename):
+        return jsonify({"error": f"Formato no soportado. Usa: {', '.join(EXTENSIONES_PERMITIDAS)}"}), 400
+
+    extension = archivo.filename.rsplit(".", 1)[1].lower()
+    ruta_temp = CARPETA_AUDIOS / f"_voz_{uuid.uuid4().hex}.{extension}"
+    archivo.save(str(ruta_temp))
+
+    try:
+        embedding = calcular_embedding(str(ruta_temp))
+    except Exception as e:
+        return jsonify({"error": f"No se pudo procesar el audio: {e}"}), 500
+    finally:
+        if ruta_temp.exists():
+            try:
+                os.remove(ruta_temp)
+            except Exception:
+                pass
+
+    biblioteca = cargar_biblioteca_voces()
+    biblioteca[nombre] = embedding
+    guardar_biblioteca_voces(biblioteca)
+    return jsonify({"ok": True, "nombre": nombre, "voces": sorted(biblioteca.keys())})
+
+
+@app.route("/voces/<nombre>", methods=["DELETE"])
+def eliminar_voz(nombre):
+    """Elimina una voz registrada."""
+    biblioteca = cargar_biblioteca_voces()
+    if nombre not in biblioteca:
+        return jsonify({"error": "Voz no encontrada."}), 404
+    del biblioteca[nombre]
+    guardar_biblioteca_voces(biblioteca)
+    return jsonify({"ok": True, "voces": sorted(biblioteca.keys())})
+
+
+@app.route("/voces/registrar_desde_job/<job_id>", methods=["POST"])
+def registrar_desde_job(job_id):
+    """Opción C: registra una voz tomando los segmentos de un SPEAKER_XX
+    de un job ya completado. Body JSON: {speaker: 'SPEAKER_00', nombre: 'Juan'}."""
+    job = jobs.get(job_id)
+    if not job or not job.get("ruta_audio"):
+        return jsonify({"error": "Audio del job no disponible."}), 404
+    if not Path(job["ruta_audio"]).exists():
+        return jsonify({"error": "Archivo de audio ya borrado."}), 404
+
+    data = request.get_json(silent=True) or {}
+    speaker = (data.get("speaker") or "").strip()
+    nombre = (data.get("nombre") or "").strip()
+    if not speaker or not nombre:
+        return jsonify({"error": "Faltan 'speaker' o 'nombre'."}), 400
+
+    segmentos = job.get("segmentos") or []
+    segs_speaker = [s for s in segmentos if s.get("speaker") == speaker]
+    if not segs_speaker:
+        return jsonify({"error": f"No hay segmentos para {speaker}."}), 400
+
+    # Tomar el bloque contiguo más largo de hasta DURACION_MUESTRA_MATCHING segundos.
+    inicio = float(segs_speaker[0]["start"])
+    fin = float(segs_speaker[0]["end"])
+    for s in segs_speaker:
+        f = float(s["end"])
+        if f - inicio <= DURACION_MUESTRA_MATCHING:
+            fin = f
+        else:
+            break
+
+    ruta_recorte = str(CARPETA_AUDIOS / f"_voz_{uuid.uuid4().hex}.wav")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(job["ruta_audio"]),
+             "-ss", f"{inicio:.2f}", "-to", f"{fin:.2f}",
+             "-ac", "1", "-ar", "16000", "-vn", ruta_recorte],
+            capture_output=True, check=True
+        )
+        embedding = calcular_embedding(ruta_recorte)
+    except Exception as e:
+        return jsonify({"error": f"No se pudo procesar el audio: {e}"}), 500
+    finally:
+        if Path(ruta_recorte).exists():
+            try:
+                os.remove(ruta_recorte)
+            except Exception:
+                pass
+
+    biblioteca = cargar_biblioteca_voces()
+    biblioteca[nombre] = embedding
+    guardar_biblioteca_voces(biblioteca)
+    return jsonify({"ok": True, "nombre": nombre, "voces": sorted(biblioteca.keys())})
 
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("  🧪  WHISPER TRANSCRIPTOR — SANDBOX (community-1)")
+    print("  🎤  WHISPER TRANSCRIPTOR + RECONOCIMIENTO DE VOZ")
     print("=" * 60)
-    print("Abre tu navegador en: http://localhost:5201")
-    print("Modelo de diarización: pyannote/speaker-diarization-community-1")
+    print("Abre tu navegador en: http://localhost:5202")
+    print("Biblioteca de voces:  ./voces/voces.json")
     print("Presiona Ctrl+C para detener el servidor.")
     print("=" * 60)
     import threading, webbrowser
-    threading.Timer(1.5, lambda: webbrowser.open("http://localhost:5201")).start()
-    app.run(debug=False, host="0.0.0.0", port=5201, threaded=True)
+    threading.Timer(1.5, lambda: webbrowser.open("http://localhost:5202")).start()
+    app.run(debug=False, host="0.0.0.0", port=5202, threaded=True)

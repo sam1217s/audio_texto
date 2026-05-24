@@ -67,11 +67,12 @@ def get_diarization_pipeline():
         if _diarization_pipeline is None:
             from pyannote.audio import Pipeline
             import torch
-            # Intentamos primero el modelo nuevo (community-1) y caemos al
-            # 3.1 si no está disponible (más rápido en GPU para audios largos).
+            # community-1 separa mejor los hablantes y usa GPU también para el
+            # clustering. 3.1 queda como fallback público por si community-1 no
+            # está accesible para el token.
             modelos = [
-                "pyannote/speaker-diarization-3.1",
                 "pyannote/speaker-diarization-community-1",
+                "pyannote/speaker-diarization-3.1",
             ]
             ultimo_error = None
             for nombre in modelos:
@@ -96,8 +97,11 @@ def get_diarization_pipeline():
 
 
 def asignar_hablantes(segmentos_whisper, diarizacion):
-    """Para cada segmento de Whisper, encuentra el hablante con más solapamiento."""
-    # pyannote 4.x devuelve DiarizeOutput; las versiones viejas devuelven Annotation directo
+    """Para cada segmento de Whisper, encuentra el hablante con más solapamiento.
+    Si no hay solapamiento (Whisper transcribió audio que pyannote consideró
+    silencio), asigna el hablante del turno más cercano en el tiempo en lugar
+    de marcarlo como desconocido."""
+    # pyannote 4.x devuelve DiarizeOutput; las viejas devuelven Annotation directo
     if hasattr(diarizacion, "speaker_diarization"):
         anotacion = diarizacion.speaker_diarization
     else:
@@ -113,6 +117,22 @@ def asignar_hablantes(segmentos_whisper, diarizacion):
             if overlap > mejor_overlap:
                 mejor_overlap = overlap
                 mejor_spk = spk
+
+        # Fallback: si ningún turno solapa, usar el turno más cercano en el tiempo.
+        if mejor_spk is None and turnos:
+            centro_seg = (ini + fin) / 2
+            mejor_dist = float("inf")
+            for t_ini, t_fin, spk in turnos:
+                if centro_seg < t_ini:
+                    dist = t_ini - centro_seg
+                elif centro_seg > t_fin:
+                    dist = centro_seg - t_fin
+                else:
+                    dist = 0.0
+                if dist < mejor_dist:
+                    mejor_dist = dist
+                    mejor_spk = spk
+
         resultado.append({
             "start": ini, "end": fin,
             "speaker": mejor_spk or "DESCONOCIDO",
@@ -281,6 +301,14 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
         idioma_detectado = resultado.get("language", "desconocido")
         texto_final = texto
 
+        # Guardar siempre los segmentos de Whisper para el reproductor con seguimiento.
+        # Si luego se diariza, se sobrescriben con los que tienen hablante.
+        jobs[job_id]["segmentos"] = [
+            {"start": float(s["start"]), "end": float(s["end"]),
+             "speaker": None, "text": s["text"].strip()}
+            for s in resultado.get("segments", [])
+        ]
+
         if diarizar:
             if not HF_TOKEN:
                 raise RuntimeError(
@@ -346,6 +374,11 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
             segs_con_hablante = asignar_hablantes(resultado["segments"], diarizacion)
             texto_final = formatear_diarizacion(segs_con_hablante)
             jobs[job_id]["muestras_hablantes"] = extraer_muestras_hablantes(segs_con_hablante)
+            jobs[job_id]["segmentos"] = [
+                {"start": float(s["start"]), "end": float(s["end"]),
+                 "speaker": s["speaker"], "text": s["text"]}
+                for s in segs_con_hablante
+            ]
 
         jobs[job_id]["progreso"] = 98
         jobs[job_id]["estado"] = "guardando"
@@ -365,10 +398,8 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
             f.write("-" * 50 + "\n\n")
             f.write(texto_final)
 
-        # Si hubo diarización, conservamos el audio para poder reproducir
-        # fragmentos de cada hablante. Si no, lo borramos como antes.
-        if not diarizar and Path(ruta_audio).exists():
-            os.remove(ruta_audio)
+        # Conservamos el audio para el reproductor con seguimiento. Se elimina
+        # cuando el usuario pulse "Nueva transcripción" o al reiniciar el server.
 
         segundos = round(time.time() - tiempo_inicio)
         jobs[job_id].update({
@@ -378,7 +409,7 @@ def procesar_audio(job_id: str, ruta_audio: str, modelo_nombre: str,
             "idioma": idioma_detectado,
             "archivo_guardado": nombre_txt,
             "tiempo_segundos": segundos,
-            "ruta_audio": str(ruta_audio) if diarizar else None,
+            "ruta_audio": str(ruta_audio),
         })
 
     except Exception as e:
@@ -507,7 +538,18 @@ def renombrar(job_id):
             except Exception as e:
                 return jsonify({"error": f"No se pudo actualizar el archivo: {e}"}), 500
 
-    # Ya identificaste a los hablantes: el audio temporal ya no se necesita.
+    # Conservamos el audio después de renombrar para que el reproductor con
+    # seguimiento (karaoke) siga funcionando. Se elimina solo al pulsar
+    # "Nueva transcripción" o al reiniciar el server.
+    return jsonify({"texto": texto, "archivo_guardado": nombre_txt})
+
+
+@app.route("/eliminar/<job_id>", methods=["POST"])
+def eliminar_job(job_id):
+    """Elimina el audio asociado a un job (al pulsar 'Nueva transcripción')."""
+    job = jobs.get(job_id)
+    if not job:
+        return jsonify({"ok": True})
     ruta_audio = job.get("ruta_audio")
     if ruta_audio and Path(ruta_audio).exists():
         try:
@@ -515,8 +557,65 @@ def renombrar(job_id):
         except Exception:
             pass
     job["ruta_audio"] = None
+    return jsonify({"ok": True})
 
-    return jsonify({"texto": texto, "archivo_guardado": nombre_txt})
+
+@app.route("/descargar/<job_id>/<formato>")
+def descargar(job_id, formato):
+    """Descarga la transcripción como TXT o PDF."""
+    job = jobs.get(job_id)
+    if not job or not job.get("texto"):
+        return jsonify({"error": "Transcripción no disponible."}), 404
+
+    nombre_txt = job.get("archivo_guardado") or "transcripcion.txt"
+    nombre_base = Path(nombre_txt).stem
+
+    if formato == "txt":
+        ruta_txt = CARPETA_TRANSCRIPCIONES / nombre_txt
+        if not ruta_txt.exists():
+            ruta_txt = CARPETA_TRANSCRIPCIONES / f"{nombre_base}.txt"
+            ruta_txt.write_text(job["texto"], encoding="utf-8")
+        return send_file(str(ruta_txt), as_attachment=True,
+                         download_name=f"{nombre_base}.txt",
+                         mimetype="text/plain; charset=utf-8")
+
+    if formato == "pdf":
+        from fpdf import FPDF
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_auto_page_break(auto=True, margin=15)
+
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.cell(0, 10, "Transcripción", ln=True)
+        pdf.set_font("Helvetica", size=10)
+        pdf.set_text_color(110, 110, 110)
+        pdf.cell(0, 6, f"Idioma detectado: {job.get('idioma', '?')}", ln=True)
+        pdf.cell(0, 6, f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True)
+        if job.get("tiempo_segundos"):
+            pdf.cell(0, 6, f"Tiempo de procesamiento: {job['tiempo_segundos']} s", ln=True)
+        pdf.ln(4)
+        pdf.set_draw_color(200, 200, 200)
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+        pdf.ln(4)
+
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_font("Helvetica", size=11)
+        for parrafo in (job["texto"] or "").split("\n"):
+            if not parrafo.strip():
+                pdf.ln(3)
+                continue
+            try:
+                pdf.multi_cell(0, 6, parrafo)
+            except Exception:
+                pdf.multi_cell(0, 6, parrafo.encode("latin-1", "replace").decode("latin-1"))
+
+        ruta_pdf = CARPETA_TRANSCRIPCIONES / f"{nombre_base}.pdf"
+        pdf.output(str(ruta_pdf))
+        return send_file(str(ruta_pdf), as_attachment=True,
+                         download_name=f"{nombre_base}.pdf",
+                         mimetype="application/pdf")
+
+    return jsonify({"error": "Formato no soportado. Usa txt o pdf."}), 400
 
 
 if __name__ == "__main__":
